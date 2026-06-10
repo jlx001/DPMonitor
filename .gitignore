@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+build/
+dist/
+*.spec
+app.log
+.env
+.vscode/
+*.code-workspace
+.DS_Store
+Thumbs.db
+.claude/
+*.md
+!README.md
+test.html
+test_*.py
