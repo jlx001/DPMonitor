@@ -124,9 +124,12 @@ class Settings:
             self.set_platform_token(platform_token)
         if platform_cookie is not None:
             self.set_platform_cookie(platform_cookie)
+        auto_start = new_data.pop("auto_start", None)
         current = self._read()
         current.update(new_data)
         self._write(current)
+        if auto_start is not None:
+            self.set_auto_start(auto_start)
 
     # --- Auto-start ---
     def set_auto_start(self, enable: bool):
