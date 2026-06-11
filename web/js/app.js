@@ -163,7 +163,9 @@ var effectTimer = null;
 
 function stopEffects() {
   if (effectTimer) { clearInterval(effectTimer); effectTimer = null; }
-  document.querySelectorAll('.petal,.matrix-drop').forEach(function(p){p.remove()});
+  // Remove all effect elements from both panels
+  var all = document.querySelectorAll('.petal,.matrix-drop');
+  for (var i=0;i<all.length;i++) { if(all[i].parentNode) all[i].parentNode.removeChild(all[i]); }
 }
 
 function startEffects() {
