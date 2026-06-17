@@ -136,7 +136,10 @@ class Settings:
         import winreg
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
         if enable:
-            app_path = sys.argv[0] if getattr(sys, 'frozen', False) else sys.executable
+            if getattr(sys, 'frozen', False):
+                app_path = sys.executable  # PyInstaller: sys.executable = exe path
+            else:
+                app_path = sys.executable  # Dev: python.exe path
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_WRITE) as key:
                 winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{app_path}"')
         else:
