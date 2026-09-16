@@ -31,6 +31,10 @@
     </div>
   </div>
 
+  <!-- SK tabs -->
+  <div class="sk-tabs" id="skTabs"></div>
+
+  <div id="platformView">
   <!-- Overview: balance + daily/monthly merged -->
   <div class="card">
     <div class="card-header">
@@ -52,6 +56,24 @@
     </div>
   </div>
 
+  <!-- Today's usage -->
+  <div class="card">
+    <div class="card-header">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      今日用量
+    </div>
+    <div class="model-grid">
+      <div class="token-item">
+        <div class="token-label">Token</div>
+        <div class="token-value" id="todayTokens">--</div>
+      </div>
+      <div class="token-item">
+        <div class="token-label">请求数</div>
+        <div class="token-value" id="todayRequests">--</div>
+      </div>
+    </div>
+  </div>
+
   <!-- Model cards -->
   <div id="modelCards"></div>
 
@@ -66,6 +88,73 @@
       </div>
     </div>
     <div class="chart-wrap"><canvas id="chartCanvas"></canvas></div>
+  </div>
+
+  <!-- Recent conversations -->
+  <div class="card">
+    <div class="card-header">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      最近对话
+    </div>
+    <div id="recentConvList"></div>
+  </div>
+  </div>
+
+  <!-- Per-SK detail (subsidiary keys) -->
+  <div id="skDetailView" style="display:none;">
+    <div class="card">
+      <div class="card-header" id="skDetailName">SK</div>
+      <div class="overview-main">
+        <div class="overview-balance" id="skDetailBalance">--</div>
+        <div class="overview-stats">
+          <div class="stat">
+            <div class="stat-label">当日消耗</div>
+            <div class="stat-value" id="skDetailToday">--</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">本月消耗</div>
+            <div class="stat-value" id="skDetailMonth">--</div>
+          </div>
+        </div>
+      </div>
+      <div id="skDetailStatus" style="margin-top:6px;"></div>
+      <div id="skBalanceDetail" class="sk-meta"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">今日用量</div>
+      <div class="model-grid">
+        <div class="token-item">
+          <div class="token-label">Token</div>
+          <div class="token-value" id="skDetailTokens">--</div>
+        </div>
+        <div class="token-item">
+          <div class="token-label">请求数</div>
+          <div class="token-value" id="skDetailRequests">--</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">今日模型用量</div>
+      <div id="skModelBreakdown"></div>
+      <div id="skMonthTotals" class="sk-meta"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">近七天费用</div>
+      <div class="chart-wrap"><canvas id="skChartCanvas"></canvas></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">最近对话</div>
+      <div id="skConvList"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">配额说明</div>
+      <div id="skDetailMeta" class="sk-hint"></div>
+    </div>
   </div>
 
 </div>
@@ -146,6 +235,7 @@
         <span class="toggle-label">开机自启</span>
         <div class="toggle-switch" id="toggleAutoStart"></div>
       </div>
+      <div class="sk-hint" id="autoStartStatus"></div>
     </div>
 
     <div class="form-group">
@@ -164,8 +254,12 @@
 
     <div class="form-group">
       <label>显示模型</label>
-      <label class="checkbox-row"><input type="checkbox" id="modelFlash" checked><span>V4 Flash</span></label>
-      <label class="checkbox-row"><input type="checkbox" id="modelPro" checked><span>V4 Pro</span></label>
+      <div id="modelFilterList"></div>
+      <div class="sk-hint" id="modelFilterHint"></div>
+    </div>
+
+    <div class="form-group">
+      <button class="btn btn-secondary btn-block" id="btnOpenSk">SK 管理（多 Key 调度网关）</button>
     </div>
 
     <div class="btn-row">
@@ -176,7 +270,170 @@
 </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<!-- ========== SK PANEL ========== -->
+<div id="skPanel" style="display:none;">
+<div id="app">
+
+  <div class="titlebar">
+    <div class="titlebar-left">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+      SK 管理
+    </div>
+    <div class="titlebar-actions">
+      <button id="btnSkBack" title="返回设置">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="settings-page">
+
+    <div class="card">
+      <div class="card-header">Codex 网关接入</div>
+      <div id="codexStatus" class="sk-hint">检测中...</div>
+      <div class="btn-row" style="margin-top:8px;">
+        <button class="btn btn-primary" id="btnApplyGateway">接入网关</button>
+        <button class="btn btn-secondary" id="btnRestoreGateway">还原直连</button>
+      </div>
+      <div class="sk-hint">接入后需重启一次 Codex 生效；之后切换 SK 无需重启。还原仅在有备份时可用。</div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">网关状态</div>
+      <div id="gatewayStatus" class="sk-hint">--</div>
+      <div id="skStatus" style="margin-top:6px;"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">SK 列表</div>
+      <div id="skList"></div>
+      <button class="btn btn-secondary btn-block" id="btnAddSk">+ 新增 SK</button>
+    </div>
+
+    <div class="card" id="skFormCard" style="display:none;">
+      <div class="card-header" id="skFormTitle">编辑 SK</div>
+      <div class="form-group">
+        <label>名称</label>
+        <input type="text" id="skName" placeholder="如：主账号">
+      </div>
+      <div class="form-group">
+        <label>API Key</label>
+        <input type="password" id="skApiKey" placeholder="sk-..." autocomplete="off">
+        <div class="sk-hint">编辑时留空或保持掩码则不修改 Key</div>
+      </div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label>配额权重</label>
+          <input type="number" id="skWeight" value="1" min="1">
+        </div>
+        <div class="form-group">
+          <label>时段（HH:MM-HH:MM; 分号分隔）</label>
+          <input type="text" id="skWindows" placeholder="09:00-18:00; 20:00-23:00">
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label>每日费用上限 (￥)</label>
+          <input type="number" id="skDailyCap" placeholder="0 = 不限" step="0.01" min="0">
+        </div>
+        <div class="form-group">
+          <label>每月费用上限 (￥)</label>
+          <input type="number" id="skMonthlyCap" placeholder="0 = 不限" step="0.01" min="0">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="checkbox-row"><input type="checkbox" id="skDefault"><span>设为默认 SK（全池不可用时兜底）</span></label>
+        <label class="checkbox-row"><input type="checkbox" id="skPlatform"><span>主账号（绑定平台 Token，主界面显示完整用量）</span></label>
+        <label class="checkbox-row"><input type="checkbox" id="skEnabled" checked><span>启用</span></label>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="btnSaveSk">保存</button>
+        <button class="btn btn-secondary" id="btnCancelSk">取消</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">全局配置</div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label>网关端口</label>
+          <input type="number" id="gwPort" min="1" max="65535">
+          <div class="sk-hint">修改后需重启应用生效</div>
+        </div>
+        <div class="form-group">
+          <label>单对话费用阈值 (￥)</label>
+          <input type="number" id="convLimit" step="0.01" min="0">
+          <div class="sk-hint">超过后提示新建对话</div>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label>高峰时段（周一至五 HH:MM-HH:MM; 分隔）</label>
+          <input type="text" id="peakWindows" placeholder="09:00-12:00; 14:00-18:00">
+        </div>
+        <div class="form-group">
+          <label>余额轮询间隔（分钟）</label>
+          <input type="number" id="balancePoll" min="1">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>模型价格</label>
+        <select id="priceModel"></select>
+        <div class="sk-hint" id="priceHint"></div>
+      </div>
+      <div class="sk-hint">闲时价格（元/百万 token）</div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label>输入·缓存命中</label>
+          <input type="number" id="priceHit" step="0.001" min="0">
+        </div>
+        <div class="form-group">
+          <label>输入·缓存未命中</label>
+          <input type="number" id="priceMiss" step="0.001" min="0">
+        </div>
+        <div class="form-group">
+          <label>输出</label>
+          <input type="number" id="priceOut" step="0.001" min="0">
+        </div>
+      </div>
+      <div class="sk-hint">高峰价格（元/百万 token）</div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label>输入·缓存命中</label>
+          <input type="number" id="peakHit" step="0.001" min="0">
+        </div>
+        <div class="form-group">
+          <label>输入·缓存未命中</label>
+          <input type="number" id="peakMiss" step="0.001" min="0">
+        </div>
+        <div class="form-group">
+          <label>输出</label>
+          <input type="number" id="peakOut" step="0.001" min="0">
+        </div>
+      </div>
+      <div class="sk-hint">默认取自官方刊例价（V4.1-Flash 0.02/1/4、V4-Pro 0.15/4.5/13.5，闲时为高峰一半）；余额轮询作为真实依据。</div>
+      <div class="btn-row" style="margin-top:8px;">
+        <button class="btn btn-primary btn-block" id="btnSaveGlobal">保存全局配置</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">当前对话（最近 50）</div>
+      <div id="convList"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">事件日志（最近 50）</div>
+      <div id="eventList"></div>
+    </div>
+
+  </div>
+</div>
+</div>
+
+<div id="notifyBanner" class="notify-banner" style="display:none;"></div>
+
+<script src="js/vendor/chart.umd.min.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

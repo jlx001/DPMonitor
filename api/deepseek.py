@@ -7,6 +7,43 @@ from datetime import datetime, timedelta
 PLATFORM_BASE = "https://platform.deepseek.com/api/v0"
 
 
+def fetch_balance(api_key: str):
+    """Query account balance using the API key itself (no cookie needed)."""
+    resp = requests.get(
+        "https://api.deepseek.com/user/balance",
+        headers={
+            "Authorization": "Bearer {}".format(api_key),
+            "Accept": "application/json",
+        },
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        return None
+    data = resp.json()
+    infos = data.get("balance_infos") or []
+    total = sum(
+        float(item.get("total_balance", 0))
+        for item in infos
+        if item.get("currency") == "CNY"
+    )
+    granted = sum(
+        float(item.get("granted_balance", 0))
+        for item in infos
+        if item.get("currency") == "CNY"
+    )
+    topped_up = sum(
+        float(item.get("topped_up_balance", 0))
+        for item in infos
+        if item.get("currency") == "CNY"
+    )
+    return {
+        "balance": total,
+        "granted_balance": granted,
+        "topped_up_balance": topped_up,
+        "is_available": bool(data.get("is_available", total > 0)),
+    }
+
+
 def _log(msg: str):
     now = dt.datetime.now().strftime("%H:%M:%S")
     line = f"[{now}] {msg}"
@@ -17,6 +54,16 @@ def _log(msg: str):
             f.write(line + "\n")
     except:
         pass
+
+
+def _merge_model_names(*sources) -> list:
+    """Model names in platform order, duplicates removed."""
+    names = []
+    for source in sources:
+        for name in source:
+            if name not in names:
+                names.append(name)
+    return names
 
 
 class DeepSeekPlatform:
@@ -54,9 +101,9 @@ class DeepSeekPlatform:
     # ------------------------------------------------------------------
 
     def get_summary(self) -> dict:
-        """Overall account summary — balance, monthly usage, monthly cost."""
+        """Overall account summary — balance only."""
         d = self._get("/users/get_user_summary")
-        _log(f"Summary: OK ({len(d.get('normal_wallets',[]))} wallets, {len(d.get('monthly_costs',[]))} costs)")
+        _log(f"Summary: OK ({len(d.get('normal_wallets',[]))} wallets)")
 
         def _cny(items: list) -> str:
             for it in items:
@@ -65,16 +112,7 @@ class DeepSeekPlatform:
             return items[0].get("balance") or items[0].get("amount") or "0" if items else "0"
 
         balance = float(_cny(d.get("normal_wallets", [])))
-        monthly_cost = float(_cny(d.get("monthly_costs", [])))
-        monthly_tokens = int(float(d.get("monthly_token_usage", "0")))
-        current_token = int(float(d.get("current_token", "0")))
-
-        return {
-            "balance": balance,
-            "monthly_cost": monthly_cost,
-            "monthly_tokens": monthly_tokens,
-            "current_tokens": current_token,
-        }
+        return {"balance": balance}
 
     # ------------------------------------------------------------------
     # Cost & Amount (per-model, per-day breakdown)
@@ -184,19 +222,20 @@ class DeepSeekPlatform:
         # Daily cost for today
         today_str = now.strftime("%Y-%m-%d")
         daily_cost = costs.get("days", {}).get(today_str, {}).get("cost", 0.0)
+        # Monthly cost comes from the current-month cost endpoint because the
+        # summary endpoint no longer exposes a monthly-cost field.
+        monthly_cost = round(sum(
+            item.get("cost", 0.0)
+            for item in costs.get("total", {}).values()), 4)
 
-        # Build per-model stats
+        # Build per-model stats. Model names come straight from the platform
+        # response, so renamed or newly added models show up without a code
+        # change.
         models = {}
         cost_total = costs.get("total", {})
         token_total = tokens.get("total", {})
-
-        # Only keep actual model names (v4-flash, v4-pro)
-        KEEP_MODELS = {'deepseek-v4-flash', 'deepseek-v4-pro'}
-        all_models = set()
-        for m in list(cost_total.keys()) + list(token_total.keys()):
-            if m in KEEP_MODELS:
-                all_models.add(m)
-        for model in all_models:
+        model_names = _merge_model_names(cost_total, token_total)
+        for model in model_names:
             t = token_total.get(model, {})
             c = cost_total.get(model, {})
             models[model] = {
@@ -213,10 +252,11 @@ class DeepSeekPlatform:
         raw_days = costs.get("days", {})
         _log(f"Daily breakdown: {len(raw_days)} days")
         for ds, day in sorted(raw_days.items()):
+            if ds > today_str:
+                continue
             day_cost = day.get("cost", 0.0)
             per_model = {}
             for m, v in day.get("models", {}).items():
-                if m not in KEEP_MODELS: continue
                 mc = v.get("cost", 0.0) if isinstance(v, dict) else 0.0
                 per_model[m] = round(mc, 4)
             all_days.append({
@@ -234,13 +274,14 @@ class DeepSeekPlatform:
         today_models = {}
         today_tokens = tokens.get("days", {}).get(today_str, {})
         today_costs = costs.get("days", {}).get(today_str, {}).get("models", {})
-        for model in all_models:
+        for model in model_names:
             t = today_tokens.get(model, {})
             c = today_costs.get(model, {})
             today_models[model] = {
                 "input_tokens_cache_hit": t.get("cache_hit_tokens", 0) if isinstance(t, dict) else 0,
                 "input_tokens_cache_miss": t.get("cache_miss_tokens", 0) if isinstance(t, dict) else 0,
                 "output_tokens": t.get("completion_tokens", 0) if isinstance(t, dict) else 0,
+                "requests": t.get("requests", 0) if isinstance(t, dict) else 0,
                 "cost": c.get("cost", 0.0) if isinstance(c, dict) else 0.0,
             }
 
@@ -251,7 +292,7 @@ class DeepSeekPlatform:
             },
             "usage": {
                 "daily_cost": round(daily_cost, 4),
-                "monthly_cost": round(summary["monthly_cost"], 4),
+                "monthly_cost": monthly_cost,
                 "models": models,
                 "today_models": today_models,
                 "daily_breakdown": all_days,

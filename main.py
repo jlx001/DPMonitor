@@ -1,19 +1,38 @@
 """
 DeepSeek API Usage Monitor — system tray + dual-theme popup.
 """
-import json, os, sys, threading, ctypes, datetime
+import json, os, sys, threading, ctypes, datetime, time
 from ctypes import wintypes
 
 import webview, pystray
 from PIL import Image, ImageDraw
 
+from config.settings import APP_NAME
 from config.settings import Settings
+from config.settings import SK_KEY_MASK
 from api.deepseek import DeepSeekPlatform
+from api.deepseek import fetch_balance
+import codex_integration
+from router import conversation, gateway as gateway_mod, notifier
+from router import sk_pool, usage_store
 
 # ---------------------------------------------------------------------------
 # Logging (no sensitive data)
 # ---------------------------------------------------------------------------
-LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.log")
+def _log_path() -> str:
+    """Keep logs beside the config so they survive temp-dir cleanup."""
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    directory = os.path.join(base, APP_NAME)
+    try:
+        os.makedirs(directory, exist_ok=True)
+        return os.path.join(directory, "app.log")
+    except OSError:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "app.log")
+
+
+LOG_PATH = _log_path()
+
 
 def log(msg: str):
     now = datetime.datetime.now().strftime("%H:%M:%S")
@@ -25,7 +44,26 @@ def log(msg: str):
     except:
         pass
 
+
 log("=== App started ===")
+
+
+_singleton_handle = None
+
+
+def _acquire_single_instance() -> bool:
+    """Hold a session mutex so duplicated logon triggers cannot stack."""
+    global _singleton_handle
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.CreateMutexW(None, False,
+                                   "Local\\DeepSeekMonitor.Singleton")
+    if not handle:
+        return True
+    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(handle)
+        return False
+    _singleton_handle = handle
+    return True
 
 # ---------------------------------------------------------------------------
 # Win32
@@ -79,6 +117,143 @@ _settings = Settings()
 _api = None
 _window = None
 _visible = True
+_gateway = None
+_pool = None
+_conversations = None
+_usage_store = None
+_notifier = notifier.Notifier()
+_balances = {}
+_balance_lock = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# Multi-SK gateway
+# ---------------------------------------------------------------------------
+def _get_price_table():
+    return _settings.get("price_table") or usage_store.DEFAULT_PRICE_TABLE
+
+
+def _rebuild_pool():
+    global _pool
+    entries = _settings.get_sk_pool()
+    configs = []
+    keys = {}
+    for entry in entries:
+        sk_id = entry.get("id", "")
+        if not sk_id:
+            continue
+        configs.append(sk_pool.SKConfig(
+            id=sk_id,
+            name=entry.get("name", sk_id),
+            weight=max(int(entry.get("weight", 1) or 1), 1),
+            daily_cost_cap=float(entry.get("daily_cost_cap", 0) or 0),
+            monthly_cost_cap=float(entry.get("monthly_cost_cap", 0) or 0),
+            time_windows=list(entry.get("time_windows") or []),
+            is_default=bool(entry.get("is_default", False)),
+            is_platform=bool(entry.get("is_platform", False)),
+            enabled=bool(entry.get("enabled", True)),
+        ))
+        keys[sk_id] = entry.get("api_key", "")
+    _pool = sk_pool.SKPool(configs, _usage_store)
+    for sk in _pool.all():
+        sk.api_key = keys.get(sk.cfg.id, "")
+        cached = _balances.get(sk.cfg.id)
+        if cached is not None:
+            sk.balance = cached["balance"]
+            sk.is_available = cached["is_available"]
+
+
+def _build_state():
+    global _conversations
+    _rebuild_pool()
+    if _conversations is None:
+        _conversations = conversation.ConversationStore(_pool, _usage_store)
+    else:
+        _conversations.set_pool(_pool)
+    return gateway_mod.GatewayState(
+        pool=_pool,
+        conversations=_conversations,
+        usage=_usage_store,
+        notifier=_notifier,
+        conversation_cost_limit=float(
+            _settings.get("conversation_cost_limit") or 5.0),
+    )
+
+
+def _start_gateway():
+    global _gateway, _usage_store
+    if _gateway is not None:
+        return
+    _usage_store = usage_store.UsageStore(price_table=_get_price_table())
+    state = _build_state()
+    base_port = int(_settings.get("gateway_port") or 8787)
+    last_error = None
+    for port in range(base_port, base_port + 10):
+        try:
+            _gateway = gateway_mod.Gateway(state, port=port)
+            _gateway.start()
+            log(f"Gateway started on 127.0.0.1:{_gateway.port}")
+            return
+        except OSError as exc:
+            last_error = exc
+            continue
+    log(f"Gateway start failed: {last_error}")
+
+
+def _refresh_balances():
+    if _pool is None:
+        return
+    for sk in _pool.all():
+        if not sk.api_key:
+            continue
+        try:
+            result = fetch_balance(sk.api_key)
+        except Exception as exc:
+            log(f"Balance fetch error for {sk.cfg.id}: {exc}")
+            continue
+        if result is None:
+            log(f"Balance fetch failed for {sk.cfg.id}")
+            continue
+        with _balance_lock:
+            _balances[sk.cfg.id] = result
+            _pool.set_balance(
+                sk.cfg.id, result["balance"], result["is_available"])
+
+
+def _balance_worker():
+    while True:
+        _refresh_balances()
+        interval_minutes = max(
+            int(_settings.get("balance_poll_minutes") or 10), 1)
+        time.sleep(interval_minutes * 60)
+
+
+def _kick_balance_refresh():
+    thread = threading.Thread(target=_refresh_balances, daemon=True)
+    thread.start()
+
+
+def _register_notifier(tray_icon):
+    def tray_sink(kind, message, sk_id):
+        try:
+            tray_icon.notify(message, title="DeepSeek Monitor")
+        except Exception as exc:
+            log(f"Tray notify error: {exc}")
+
+    def panel_sink(kind, message, sk_id):
+        if _window is None:
+            return
+        try:
+            _window.evaluate_js(
+                "try{if(window._onNotify)_onNotify("
+                + json.dumps({"kind": kind, "message": message,
+                              "sk_id": sk_id})
+                + ")}catch(e){}")
+        except Exception:
+            pass
+
+    _notifier.add_sink(tray_sink)
+    _notifier.add_sink(panel_sink)
 
 
 def _get_platform():
@@ -105,6 +280,10 @@ def _make_icon():
 # ---------------------------------------------------------------------------
 class Bridge:
 
+    def log_js(self, message):
+        log("JS: {}".format(message))
+        return True
+
     def get_usage_data(self):
         platform = _get_platform()
         if not platform:
@@ -123,12 +302,20 @@ class Bridge:
 
     def save_settings(self, raw: str):
         data = json.loads(raw)
-        _settings.save_all(data)
+        saved = _settings.save_all(data)
+        result = {"success": bool(saved),
+                  "auto_start": _settings.auto_start_status()}
+        if not saved:
+            log("Auto-start entry write failed")
+            result["error"] = "开机自启写入失败"
         if _window:
             _window.evaluate_js(
                 "try{if(window._onCfg)window._onCfg("
                 + json.dumps(data) + ")}catch(e){}")
-        return {"success": True}
+        return result
+
+    def get_autostart_status(self):
+        return _settings.auto_start_status()
 
     def test_platform_token(self, token: str, cookie: str = ""):
         try:
@@ -171,6 +358,113 @@ class Bridge:
                 "if(window.showPanel)showPanel('main');"
                 "if(window.refreshData)refreshData()")
 
+    def get_gateway_status(self):
+        return {
+            "running": _gateway is not None,
+            "port": _gateway.port if _gateway else None,
+            "gateway_port": _settings.get("gateway_port"),
+            "conversation_cost_limit": _settings.get(
+                "conversation_cost_limit"),
+            "balance_poll_minutes": _settings.get("balance_poll_minutes"),
+            "price_table": _get_price_table(),
+            "codex": codex_integration.status(),
+        }
+
+    def get_sk_pool(self):
+        try:
+            result = []
+            for entry in _settings.get_sk_pool():
+                item = dict(entry)
+                item["api_key"] = SK_KEY_MASK if item.get("api_key") else ""
+                sk = _pool.get(item["id"]) if _pool else None
+                item["balance"] = sk.balance if sk else None
+                item["is_available"] = sk.is_available if sk else True
+                item["suspended"] = bool(
+                    sk and sk.suspended_until > time.time())
+                item["is_platform"] = bool(item.get("is_platform", False))
+                if _usage_store is not None:
+                    item["today_cost"] = _usage_store.today_cost(item["id"])
+                    item["month_cost"] = _usage_store.month_cost(item["id"])
+                    daily = _usage_store.daily_stats(item["id"])
+                    item["today_tokens"] = daily["tokens"]
+                    item["today_requests"] = daily["requests"]
+                else:
+                    item["today_cost"] = 0
+                    item["month_cost"] = 0
+                    item["today_tokens"] = 0
+                    item["today_requests"] = 0
+                result.append(item)
+            return result
+        except Exception as exc:
+            import traceback
+            log("get_sk_pool error: {}\n{}".format(
+                exc, traceback.format_exc()))
+            raise
+
+    def get_sk_daily_series(self, sk_id):
+        if _usage_store is None:
+            return []
+        return _usage_store.daily_cost_series(sk_id, days=7)
+
+    def get_sk_detail(self, sk_id):
+        if _usage_store is None:
+            return {}
+        with _balance_lock:
+            balance = dict(_balances.get(sk_id) or {})
+        return {
+            "balance": balance,
+            "model_today": _usage_store.model_breakdown(sk_id, month=False),
+            "model_month": _usage_store.model_breakdown(sk_id, month=True),
+            "token_series": _usage_store.daily_token_series(sk_id, days=7),
+            "conversations": _usage_store.conversations_by_sk(
+                sk_id, limit=10),
+        }
+
+    def save_sk_pool(self, raw):
+        entries = json.loads(raw)
+        _settings.save_sk_pool(entries)
+        if _gateway is not None:
+            _gateway.set_state(_build_state())
+        _kick_balance_refresh()
+        return {"success": True}
+
+    def test_sk(self, api_key):
+        try:
+            result = fetch_balance(api_key.strip())
+            return {
+                "valid": result is not None,
+                "balance": result["balance"] if result else None,
+            }
+        except Exception:
+            return {"valid": False, "balance": None}
+
+    def get_sk_usage(self):
+        totals = _usage_store.sk_totals() if _usage_store else []
+        return {"totals": totals}
+
+    def get_conversations(self):
+        return _usage_store.conversations(limit=50) if _usage_store else []
+
+    def clear_conversations(self):
+        if _usage_store is None:
+            return {"cleared": 0}
+        return {"cleared": _usage_store.clear_conversations()}
+
+    def get_events(self, limit=50):
+        return _usage_store.events(limit=limit) if _usage_store else []
+
+    def apply_codex_gateway(self):
+        port = int(_settings.get("gateway_port") or 8787)
+        return codex_integration.apply_gateway(port=port)
+
+    def restore_codex_config(self):
+        return {"restored": codex_integration.restore()}
+
+    def reload_gateway_config(self):
+        if _gateway is not None:
+            _gateway.set_state(_build_state())
+        return {"success": True}
+
 
 # ---------------------------------------------------------------------------
 # Tray
@@ -185,13 +479,21 @@ def _on_toggle(icon, item):
 
 def _on_refresh(icon, item):
     if _window:
-        _window.evaluate_js("if(window.refreshData)refreshData()")
+        _window.evaluate_js(
+            "if(window.manualRefresh)manualRefresh() "
+            "else if(window.refreshData)refreshData()")
 
 def _on_settings(icon, item):
     if _window:
         _window.evaluate_js("if(window.showPanel)showPanel('settings')")
 
 def _on_quit(icon, item):
+    global _gateway
+    if _gateway is not None:
+        try:
+            _gateway.stop()
+        except Exception:
+            pass
     icon.stop()
     try: _window.destroy()
     except: pass
@@ -203,6 +505,20 @@ def _on_quit(icon, item):
 # ---------------------------------------------------------------------------
 def main():
     global _window
+
+    if not _acquire_single_instance():
+        log("Another instance is already running; exiting")
+        return
+    log("Executable: {} (frozen={})".format(
+        sys.executable, getattr(sys, "frozen", False)))
+    try:
+        if _settings.sync_auto_start():
+            log("Auto-start triggers repointed to current executable")
+    except OSError as exc:
+        log(f"Auto-start sync failed: {exc}")
+    status = _settings.auto_start_status()
+    log("Auto-start enabled={} registry_ok={} shortcut_ok={}".format(
+        status["enabled"], status["registry_ok"], status["shortcut_ok"]))
 
     base = os.path.dirname(os.path.abspath(__file__))
     if getattr(sys, "frozen", False):
@@ -223,6 +539,9 @@ def main():
         ))
     threading.Thread(target=tray.run, daemon=True).start()
     log("Tray started")
+    _register_notifier(tray)
+    _start_gateway()
+    threading.Thread(target=_balance_worker, daemon=True).start()
 
     # Window
     _window = webview.create_window(
@@ -236,6 +555,7 @@ def main():
 
     def on_loaded():
         log("Page loaded")
+        _window.show()
         # Restore saved position or use default
         sx = _settings.get("window_x") or 100
         sy = _settings.get("window_y") or 100
@@ -246,12 +566,24 @@ def main():
     _window.events.loaded += on_loaded
 
     log("Starting event loop...")
-    try:
-        webview.start(gui="edgechromium", http_server=True, debug=False)
-    except Exception as e:
-        log(f"start crashed: {e}")
-        import traceback; log(traceback.format_exc())
-    log("Event loop ended")
+    _run_ui()
+
+
+def _run_ui():
+    """Retry the UI because WebView2 can still be warming up after logon."""
+    for attempt, delay in enumerate((0, 20, 45), start=1):
+        if delay:
+            log(f"UI retry {attempt} in {delay}s")
+            time.sleep(delay)
+        try:
+            webview.start(gui="edgechromium", http_server=True, debug=False)
+            log("Event loop ended")
+            return True
+        except Exception as exc:
+            log(f"start crashed: {exc}")
+            import traceback
+            log(traceback.format_exc())
+    return False
 
 
 if __name__ == "__main__":
