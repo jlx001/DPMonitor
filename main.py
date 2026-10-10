@@ -7,6 +7,7 @@ from ctypes import wintypes
 import webview, pystray
 from PIL import Image, ImageDraw
 
+import app_lifecycle
 from config.settings import APP_NAME
 from config.settings import Settings
 from config.settings import SK_KEY_MASK
@@ -14,7 +15,7 @@ from api.deepseek import DeepSeekPlatform
 from api.deepseek import fetch_balance
 import codex_integration
 from router import conversation, gateway as gateway_mod, notifier
-from router import sk_pool, usage_store
+from router import net_policy, sk_pool, usage_store
 
 # ---------------------------------------------------------------------------
 # Logging (no sensitive data)
@@ -64,6 +65,17 @@ def _acquire_single_instance() -> bool:
         return False
     _singleton_handle = handle
     return True
+
+
+def _wait_for_singleton(timeout_seconds: float = 8.0) -> bool:
+    """Retry because a just terminated build may still hold the mutex."""
+    deadline = time.time() + timeout_seconds
+    while True:
+        if _acquire_single_instance():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.2)
 
 # ---------------------------------------------------------------------------
 # Win32
@@ -131,6 +143,19 @@ _balance_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 def _get_price_table():
     return _settings.get("price_table") or usage_store.DEFAULT_PRICE_TABLE
+
+
+def _apply_net_policy():
+    """Apply the saved egress policy and log the chosen source address."""
+    net_policy.configure(
+        enabled=bool(_settings.get("use_system_proxy")),
+        direct_interface=bool(_settings.get("direct_interface")),
+        interface_ip=_settings.get("direct_interface_ip") or "",
+    )
+    log("Egress: system_proxy={} direct_interface={} source={}".format(
+        net_policy.use_system_proxy(),
+        net_policy.direct_interface_enabled(),
+        net_policy.physical_ip() or "system-default"))
 
 
 def _rebuild_pool():
@@ -301,8 +326,14 @@ class Bridge:
         return _settings.get_all()
 
     def save_settings(self, raw: str):
+        global _api
         data = json.loads(raw)
         saved = _settings.save_all(data)
+        _apply_net_policy()
+        # 出口策略可能变化，丢弃缓存的平台客户端并刷新网关状态
+        _api = None
+        if _gateway is not None:
+            _gateway.set_state(_build_state())
         result = {"success": bool(saved),
                   "auto_start": _settings.auto_start_status()}
         if not saved:
@@ -368,6 +399,14 @@ class Bridge:
             "balance_poll_minutes": _settings.get("balance_poll_minutes"),
             "price_table": _get_price_table(),
             "codex": codex_integration.status(),
+        }
+
+    def get_egress_status(self):
+        return {
+            "use_system_proxy": net_policy.use_system_proxy(),
+            "direct_interface": net_policy.direct_interface_enabled(),
+            "source_address": net_policy.physical_ip(),
+            "system_proxy": net_policy.https_proxy_url() or "",
         }
 
     def get_sk_pool(self):
@@ -506,9 +545,13 @@ def _on_quit(icon, item):
 def main():
     global _window
 
-    if not _acquire_single_instance():
+    if not app_lifecycle.take_over(log):
+        log("A newer build is already running; exiting")
+        return
+    if not _wait_for_singleton():
         log("Another instance is already running; exiting")
         return
+    _apply_net_policy()
     log("Executable: {} (frozen={})".format(
         sys.executable, getattr(sys, "frozen", False)))
     try:

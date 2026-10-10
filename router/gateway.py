@@ -4,6 +4,8 @@ import http.server
 import json
 import threading
 
+from router import net_policy
+
 SERVER_ERROR_STATUS = {401, 402, 429, 500, 502, 503, 504}
 SSE_CONTENT_TYPE = "text/event-stream"
 
@@ -246,11 +248,30 @@ class _GatewayDispatch:
         return status, content_type, payload, usage
 
     def _connect(self):
-        if self.state.upstream_scheme == "http":
-            return http.client.HTTPConnection(
-                self.state.upstream_host, self.state.upstream_port, timeout=180)
-        return http.client.HTTPSConnection(
-            self.state.upstream_host, self.state.upstream_port, timeout=180)
+        bind_address = net_policy.source_address()
+        source = (bind_address, 0) if bind_address else None
+        if self.state.upstream_scheme == "https":
+            tunnel = self._proxy_tunnel()
+            if tunnel is not None:
+                return tunnel
+            return http.client.HTTPSConnection(
+                self.state.upstream_host, self.state.upstream_port,
+                timeout=180, source_address=source)
+        return http.client.HTTPConnection(
+            self.state.upstream_host, self.state.upstream_port,
+            timeout=180, source_address=source)
+
+    def _proxy_tunnel(self):
+        """按出口策略经系统代理 CONNECT 到上游；直连时返回 None。"""
+        proxy_url = net_policy.https_proxy_url()
+        endpoint = net_policy.split_proxy_url(proxy_url)
+        if endpoint is None:
+            return None
+        proxy_host, proxy_port = endpoint
+        conn = http.client.HTTPSConnection(
+            proxy_host, proxy_port, timeout=180)
+        conn.set_tunnel(self.state.upstream_host, self.state.upstream_port)
+        return conn
 
     def _drain_sse(self, response):
         chunks = []

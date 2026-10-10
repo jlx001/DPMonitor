@@ -232,6 +232,26 @@
 
     <div class="form-group">
       <div class="toggle-row">
+        <span class="toggle-label">使用系统代理</span>
+        <div class="toggle-switch" id="toggleSystemProxy"></div>
+      </div>
+      <div class="sk-hint">
+        默认关闭：所有请求直连 DeepSeek 接口；开启后沿用 Windows 系统代理
+      </div>
+    </div>
+
+    <div class="form-group">
+      <div class="toggle-row">
+        <span class="toggle-label">绕过虚拟网卡/VPN</span>
+        <div class="toggle-switch" id="toggleDirectInterface"></div>
+      </div>
+      <div class="sk-hint" id="egressHint">
+        开启后出网绑定物理网卡，FlyingBird 等虚拟网卡不再接管
+      </div>
+    </div>
+
+    <div class="form-group">
+      <div class="toggle-row">
         <span class="toggle-label">开机自启</span>
         <div class="toggle-switch" id="toggleAutoStart"></div>
       </div>

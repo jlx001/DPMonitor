@@ -1086,6 +1086,20 @@ function renderAutoStartStatus(s) {
   box.textContent = parts.join(' | ');
 }
 
+function loadEgressStatus() {
+  api.get_egress_status().then(function(s){
+    var box = document.getElementById('egressHint');
+    if (!box || !s) return;
+    if (s.use_system_proxy) {
+      box.textContent = '当前：走系统代理（'+(s.system_proxy||'未检测到系统代理')+'）';
+    } else if (s.source_address) {
+      box.textContent = '当前出网：'+s.source_address+'（绑定物理网卡，虚拟网卡不接管）';
+    } else {
+      box.textContent = '未检测到物理网卡出口，按系统默认路由出网';
+    }
+  }).catch(function(){});
+}
+
 // ===== Settings =====
 function loadForm() {
   api.get_settings().then(function(s){
@@ -1095,12 +1109,15 @@ function loadForm() {
     document.getElementById('refreshInterval').value = String(s.refresh_interval_minutes||10);
     T('toggleAutoStart',!!s.auto_start);
     T('toggleAlert',!!s.alert_enabled);
+    T('toggleSystemProxy',!!s.use_system_proxy);
+    T('toggleDirectInterface',s.direct_interface!==false);
     document.getElementById('alertBalance').value = s.alert_balance_threshold||10;
     document.getElementById('alertDaily').value = s.alert_daily_threshold||50;
     if(s.hidden_models)hiddenModels=s.hidden_models.slice();
     renderModelFilter();
     loadModelNames();
     loadAutoStartStatus();
+    loadEgressStatus();
     var cur=document.body.className.replace('theme-','')||'glass';
     document.querySelectorAll('.theme-opt').forEach(function(el){el.classList.toggle('active',el.dataset.theme===cur)});
     U();
@@ -1130,12 +1147,15 @@ document.getElementById('btnSave').addEventListener('click',function(){
     alert_balance_threshold:parseFloat(document.getElementById('alertBalance').value)||10,
     alert_daily_threshold:parseFloat(document.getElementById('alertDaily').value)||50,
     theme:document.body.className.replace('theme-',''),hidden_models:hiddenModels.slice(),
+    use_system_proxy:O('toggleSystemProxy'),
+    direct_interface:O('toggleDirectInterface'),
   };
   api.save_settings(JSON.stringify(d)).then(function(r){
     var ok=!r||r.success!==false;
     document.getElementById('saveStatus').innerHTML='<span class="status-badge '+
       (ok?'success':'error')+'">'+(ok?'已保存':'保存失败：'+esc(r.error||''))+'</span>';
     if(r&&r.auto_start)renderAutoStartStatus(r.auto_start);
+    loadEgressStatus();
     if(window._onCfg)window._onCfg(d);
     startTimer(d.refresh_interval_minutes);
     setTimeout(function(){document.getElementById('saveStatus').innerHTML=''},4000);

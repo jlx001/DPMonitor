@@ -47,6 +47,18 @@ pyinstaller --onefile --windowed --name "DeepSeekMonitor" --add-data "web;web" -
 
 运行日志写在 `%APPDATA%\DeepSeekMonitor\app.log`（便于开机自启时排查）。
 
+### 网络与代理
+
+应用默认直连 DeepSeek 接口，忽略环境变量代理与 Windows 系统代理；
+设置页的“使用系统代理”开关打开后，余额查询、平台用量与网关转发都会
+改用系统代理（保留系统绕过列表语义）。glass 主题背景图随程序打包，
+界面本身不再请求外部资源。
+
+另有“绕过虚拟网卡/VPN”开关（默认开启）：开启时出网 socket 绑定物理网卡
+地址（自动探测，可在配置里用 `direct_interface_ip` 手填），FlyingBird 等
+TAP/TUN 虚拟网卡不会再接管监控程序与 Codex 转发流量；探测不到物理网卡
+或关闭该开关时，按系统默认路由出网。该开关与“使用系统代理”互斥。
+
 ### 开机自启
 
 开启后同时写入两个登录触发点，任一失效仍可启动：
@@ -56,6 +68,7 @@ pyinstaller --onefile --windowed --name "DeepSeekMonitor" --add-data "web;web" -
 
 程序每次启动都会校验这两个位置是否指向当前可执行文件（换版本、挪目录后自动
 修正），设置页会显示校验结果；重复触发由单实例互斥锁兜底，不会启动两份。
+启动更新版本时会结束正在运行的旧版本并由新版本接管，旧版本不会再顶掉新版。
 
 ## 多 SK 智能调度网关（Codex 接入）
 

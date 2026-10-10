@@ -14,7 +14,7 @@ SK_KEY_MASK = "********"
 AUTOSTART_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_SHORTCUT = APP_NAME + ".lnk"
 CREATE_NO_WINDOW = 0x08000000
-CONFIG_VERSION = 3
+CONFIG_VERSION = 5
 
 DEFAULT_CONFIG = {
     "refresh_interval_minutes": 10,
@@ -32,6 +32,9 @@ DEFAULT_CONFIG = {
     "gateway_port": 8787,
     "conversation_cost_limit": 5.0,
     "balance_poll_minutes": 10,
+    "use_system_proxy": False,
+    "direct_interface": True,
+    "direct_interface_ip": "",
     "sk_pool": [],
     "price_table": DEFAULT_PRICE_TABLE,
 }
@@ -85,13 +88,16 @@ class Settings:
             self._write(DEFAULT_CONFIG.copy())
 
     def _migrate(self):
-        """Adopt the per-model price list and drop the old flat one."""
+        """Fill in keys added after this config file was written."""
         data = self._read()
-        if data.get("_version", 0) >= CONFIG_VERSION:
-            return
-        data["price_table"] = DEFAULT_PRICE_TABLE
+        before = dict(data)
+        if data.get("_version", 0) < 3:
+            data["price_table"] = DEFAULT_PRICE_TABLE
+        for key, value in DEFAULT_CONFIG.items():
+            data.setdefault(key, value)
         data["_version"] = CONFIG_VERSION
-        self._write(data)
+        if data != before:
+            self._write(data)
 
     def _read(self):
         with open(self._path, "r", encoding="utf-8") as f:
@@ -228,40 +234,55 @@ class Settings:
     def _powershell_quote(text: str) -> str:
         return "'" + str(text).replace("'", "''") + "'"
 
-    def _write_startup_shortcut(self) -> bool:
-        """Mirror the logon trigger into the Startup folder."""
-        target, arguments = self._auto_start_target()
-        shortcut = self._startup_shortcut_path()
-        folder = os.path.dirname(shortcut)
-        if not os.path.isdir(folder):
-            return False
+    @staticmethod
+    def _powershell_path() -> str:
         shell = os.path.join(
             os.environ.get("SystemRoot", r"C:\Windows"), "System32",
             "WindowsPowerShell", "v1.0", "powershell.exe")
-        if not os.path.exists(shell):
-            shell = "powershell.exe"
+        return shell if os.path.exists(shell) else "powershell.exe"
+
+    def _sync_startup_shortcut(self) -> str:
+        """Point the Startup shortcut at this build.
+
+        Returns "unchanged", "updated" or "failed" so the caller can report
+        a version change without spawning PowerShell twice.
+        """
+        target, arguments = self._auto_start_target()
+        shortcut = self._startup_shortcut_path()
+        if not os.path.isdir(os.path.dirname(shortcut)):
+            return "failed"
         script = (
             "$ws = New-Object -ComObject WScript.Shell;"
             "$lnk = $ws.CreateShortcut({shortcut});"
+            "$before = $lnk.TargetPath + '|' + $lnk.Arguments;"
             "$lnk.TargetPath = {target};"
             "$lnk.Arguments = {arguments};"
             "$lnk.WorkingDirectory = {workdir};"
-            "$lnk.Save()"
+            "$lnk.Save();"
+            "$after = $ws.CreateShortcut({shortcut}).TargetPath;"
+            "if ($after -ne {target}) {{ 'failed' }} "
+            "elseif ($before -eq {expected}) {{ 'unchanged' }} "
+            "else {{ 'updated' }}"
         ).format(
             shortcut=self._powershell_quote(shortcut),
             target=self._powershell_quote(target),
             arguments=self._powershell_quote(arguments),
             workdir=self._powershell_quote(
                 os.path.dirname(arguments or target)),
+            expected=self._powershell_quote(
+                "{}|{}".format(target, arguments)),
         )
         try:
-            subprocess.run(
-                [shell, "-NoProfile", "-NonInteractive",
+            completed = subprocess.run(
+                [self._powershell_path(), "-NoProfile", "-NonInteractive",
                  "-ExecutionPolicy", "Bypass", "-Command", script],
-                timeout=30, creationflags=CREATE_NO_WINDOW)
+                timeout=30, creationflags=CREATE_NO_WINDOW,
+                capture_output=True, text=True)
         except (OSError, subprocess.SubprocessError):
-            return False
-        return os.path.exists(shortcut)
+            return "failed"
+        lines = [line.strip() for line in (completed.stdout or "").splitlines()
+                 if line.strip()]
+        return lines[-1] if lines else "failed"
 
     def _remove_startup_shortcut(self):
         try:
@@ -318,9 +339,8 @@ class Settings:
                 changed = True
         except OSError:
             return changed
-        if current == command and not os.path.exists(
-                self._startup_shortcut_path()):
-            if self._write_startup_shortcut():
+        if current == command:
+            if self._sync_startup_shortcut() == "updated":
                 changed = True
         return changed
 
@@ -361,7 +381,7 @@ class Settings:
             command = self._auto_start_command()
             self._write_auto_start(command)
             if self._read_auto_start() == command:
-                self._write_startup_shortcut()
+                self._sync_startup_shortcut()
         else:
             self._remove_auto_start()
             self._remove_startup_shortcut()

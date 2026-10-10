@@ -4,12 +4,28 @@ DeepSeek Platform API — balance + usage from platform.deepseek.com.
 import json, requests, os, datetime as dt
 from datetime import datetime, timedelta
 
+from router import net_policy
+
 PLATFORM_BASE = "https://platform.deepseek.com/api/v0"
+
+
+def build_session() -> requests.Session:
+    """按当前出口策略建会话：默认直连，可选绑定物理网卡出口。"""
+    session = requests.Session()
+    if not net_policy.use_system_proxy():
+        session.trust_env = False
+        session.proxies = {"http": None, "https": None}
+    bind_address = net_policy.source_address()
+    if bind_address:
+        adapter = net_policy.BoundHTTPAdapter(bind_address)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+    return session
 
 
 def fetch_balance(api_key: str):
     """Query account balance using the API key itself (no cookie needed)."""
-    resp = requests.get(
+    resp = build_session().get(
         "https://api.deepseek.com/user/balance",
         headers={
             "Authorization": "Bearer {}".format(api_key),
@@ -71,7 +87,7 @@ class DeepSeekPlatform:
 
     def __init__(self, platform_token: str, cookie: str = ""):
         self.token = platform_token
-        self.sess = requests.Session()
+        self.sess = build_session()
         self.sess.headers.update({
             "Authorization": f"Bearer {platform_token}",
             "Accept": "application/json",

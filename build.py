@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.8"
 VERSION_FILE = "version_info.txt"
 EXE_NAME = "DeepSeekMonitor-{}".format(APP_VERSION)
 
