@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 VERSION_FILE = "version_info.txt"
 EXE_NAME = "DeepSeekMonitor-{}".format(APP_VERSION)
 
@@ -58,7 +58,7 @@ def build():
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
-        "--onefile", "--windowed",
+        "--onedir", "--windowed",
         "--name", EXE_NAME,
         "--version-file", version_info,
         "--add-data", f"{os.path.join(base, 'web')};web",

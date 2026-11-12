@@ -32,10 +32,16 @@ python main.py
 
 ## 打包
 
+在 `deepseek-monitor` 环境执行：
+
 ```bash
-pip install pyinstaller
-pyinstaller --onefile --windowed --name "DeepSeekMonitor" --add-data "web;web" --hidden-import keyring.backends.Windows --hidden-import pystray._win32 main.py
+python build.py
 ```
+
+产物是 `dist/DeepSeekMonitor-<版本>/` 目录，内含
+`DeepSeekMonitor-<版本>.exe` 与 `_internal/`（页面资源、依赖库、TLS
+证书），两者缺一不可，发布时整目录拷贝，不要只拷 exe。程序从自身
+目录读取页面与证书，运行期不写 `%TEMP%`，系统清理工具不会影响它。
 
 ## 配置
 
